@@ -1,0 +1,4 @@
+*.tar.gz
+data/*.zip
+data/10_top_msi/
+results/*.npy
