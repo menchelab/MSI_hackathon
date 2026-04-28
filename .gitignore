@@ -2,3 +2,9 @@
 data/*.zip
 data/10_top_msi/
 results/*.npy
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.pybiomart.sqlite
+.venv/
