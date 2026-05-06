@@ -1,8 +1,12 @@
+dash==4.1.0
 decorator==5.2.1
 networkx==3.6.1
 numpy==2.4.2
 pandas==3.0.0
+plotly==6.5.0
+pybiomart==0.2.0
 python-dateutil==2.9.0.post0
 pytz==2025.2
+requests==2.32.5
 scipy==1.17.0
 six==1.17.0

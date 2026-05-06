@@ -1,4 +1,4 @@
-#!/home/joel/miniforge3/envs/snakemake/bin/python
+#!/usr/bin/env python3
 """
 Precomputes a simplex embedding for simplex_3d.py and saves it to disk.
 

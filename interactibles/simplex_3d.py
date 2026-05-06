@@ -1,4 +1,4 @@
-#!/home/joel/miniforge3/envs/snakemake/bin/python
+#!/usr/bin/env python3
 """
 Interactive 3D simplex viewer for MSI diffusion profiles.
 
@@ -7,23 +7,36 @@ Run:
 then open http://127.0.0.1:8050 in a browser.
 
 Controls:
+  - Dataset dropdown: switch between precomputed simplex files
   - Drag the 3D plot to rotate
   - Relevance slider: hide nodes below a chosen percentile threshold
   - "New projection" button: sample a fresh random 3D view of the 4-simplex
 """
 
-import sys, os, json, argparse, time
+import sys, os, json, glob, argparse, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import dash
-from dash import dcc, html, Input, Output, State
+from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objects as go
 
-PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+PALETTE      = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
 DEFAULT_STEM = "results/simplex/diverse_k5"
+SIMPLEX_DIR  = "results/simplex"
 
-# ── Load precomputed data (or compute from scratch as fallback) ───────────────
+
+def discover_stems(directory=SIMPLEX_DIR):
+    stems = []
+    for f in sorted(glob.glob(os.path.join(directory, "*.npz"))):
+        stem = f[:-4]
+        if os.path.exists(stem + ".json"):
+            stems.append(stem)
+    return stems
+
+AVAILABLE_STEMS = discover_stems()
+
+# ── Data loading ──────────────────────────────────────────────────────────────
 
 def load_precomputed(stem):
     npz_path  = stem + ".npz"
@@ -76,28 +89,34 @@ def compute_from_scratch():
     }
 
 
+_DATA_CACHE = {}
+
+def get_data(stem):
+    if stem not in _DATA_CACHE:
+        d = load_precomputed(stem)
+        if d is None:
+            raise FileNotFoundError(f"No precomputed data for {stem}")
+        _DATA_CACHE[stem] = d
+    return _DATA_CACHE[stem]
+
+
 # Parse --data stem before Dash sees argv
 _parser = argparse.ArgumentParser(add_help=False)
 _parser.add_argument("--data", default=DEFAULT_STEM)
 _parser.add_argument("--port", type=int, default=None)
 _args, _remaining = _parser.parse_known_args()
 
-data = load_precomputed(_args.data) or compute_from_scratch()
+# Pre-load default (falls back to compute_from_scratch if needed)
+_DATA_CACHE[_args.data] = load_precomputed(_args.data) or compute_from_scratch()
 
-LABELS     = data["labels"]
-K          = data["K"]
-N          = data["N"]
-NODE_IDS   = data["node_ids"]
-NODE_NAMES = data["node_names"]
-NODE_TYPES = data["node_types"]
-W_c        = data["W_c"]
-relevance  = data["relevance"]
-dominant   = data["dominant"]
-eps        = np.finfo(float).tiny
+eps = np.finfo(float).tiny
 
-# ── Initial random projection (seed 42) ──────────────────────────────────────
+# ── Projection ────────────────────────────────────────────────────────────────
 
-def make_projection(seed):
+def make_projection(seed, stem):
+    d   = get_data(stem)
+    W_c = d["W_c"]
+    K   = d["K"]
     rng = np.random.default_rng(seed)
     Q, _ = np.linalg.qr(rng.standard_normal((K, 3)))
     Q = Q[:, :min(3, K)]
@@ -105,13 +124,13 @@ def make_projection(seed):
         Q = np.hstack([Q, np.zeros((K, 3 - Q.shape[1]))])
     return (W_c @ Q).astype(np.float32)                    # (N, 3)
 
-INIT_PROJ = make_projection(42)
 
 # ── Dash app ──────────────────────────────────────────────────────────────────
 
 app = dash.Dash(__name__, title="MSI Simplex")
 
 SLIDER_MARKS = {i: f"p{i}" for i in range(0, 100, 10)}
+STEM_OPTIONS = [{"label": os.path.basename(s), "value": s} for s in AVAILABLE_STEMS]
 
 app.layout = html.Div(
     style={"fontFamily": "sans-serif", "backgroundColor": "#f8f8f8",
@@ -133,6 +152,19 @@ app.layout = html.Div(
             style={"display": "flex", "alignItems": "center", "gap": "24px",
                    "marginBottom": "12px"},
             children=[
+                html.Div(
+                    style={"minWidth": "180px"},
+                    children=[
+                        html.Label("Dataset", style={"fontSize": "13px"}),
+                        dcc.Dropdown(
+                            id="data-stem",
+                            options=STEM_OPTIONS,
+                            value=_args.data,
+                            clearable=False,
+                            style={"fontSize": "13px"},
+                        ),
+                    ],
+                ),
                 html.Div(
                     style={"flex": "1"},
                     children=[
@@ -169,44 +201,51 @@ app.layout = html.Div(
             config={"scrollZoom": True},
         ),
 
-        # ── Legend ───────────────────────────────────────────────────────────
-        html.Div(
-            style={"textAlign": "center", "marginTop": "8px"},
-            children=[
-                html.Span(
-                    f"● {label}  ",
-                    style={"color": PALETTE[i], "fontWeight": "bold",
-                           "fontSize": "13px", "marginRight": "8px"},
-                )
-                for i, label in enumerate(LABELS)
-            ],
-        ),
+        # ── Legend (dynamic, reflects current dataset labels) ─────────────────
+        html.Div(id="legend-div",
+                 style={"textAlign": "center", "marginTop": "8px"}),
 
-        # ── Hidden store for current projection matrix ────────────────────────
-        dcc.Store(id="proj-store", data=INIT_PROJ.tolist()),
+        # ── Hidden stores ─────────────────────────────────────────────────────
+        dcc.Store(id="proj-store",
+                  data=make_projection(42, _args.data).tolist()),
     ],
 )
 
-# ── Callback: regenerate projection on button click ───────────────────────────
+# ── Callback: regenerate projection on button click or dataset change ─────────
 
 @app.callback(
     Output("proj-store", "data"),
     Input("new-proj-btn", "n_clicks"),
+    Input("data-stem", "value"),
     prevent_initial_call=True,
 )
-def reshuffle_projection(n_clicks):
-    return make_projection(n_clicks).tolist()
+def reshuffle_projection(n_clicks, stem):
+    if ctx.triggered_id == "data-stem":
+        return make_projection(42, stem).tolist()
+    return make_projection(n_clicks, stem).tolist()
 
 
-# ── Callback: redraw figure when slider or projection changes ─────────────────
+# ── Callback: redraw figure when slider, projection, or dataset changes ────────
 
 @app.callback(
     Output("simplex-graph", "figure"),
     Output("status-bar", "children"),
+    Output("legend-div", "children"),
     Input("rel-slider", "value"),
     Input("proj-store", "data"),
+    State("data-stem", "value"),
 )
-def update_figure(pct, proj_data):
+def update_figure(pct, proj_data, stem):
+    d          = get_data(stem)
+    labels     = d["labels"]
+    K          = d["K"]
+    N          = d["N"]
+    node_ids   = d["node_ids"]
+    node_names = d["node_names"]
+    node_types = d["node_types"]
+    relevance  = d["relevance"]
+    dominant   = d["dominant"]
+
     proj = np.array(proj_data, dtype=np.float32)
 
     threshold = np.percentile(relevance, pct)
@@ -216,17 +255,16 @@ def update_figure(pct, proj_data):
     dom_shown  = dominant[mask]
     proj_shown = proj[mask]
     idx_shown   = np.where(mask)[0]
-    ids_shown   = [NODE_IDS[i]   for i in idx_shown]
-    names_shown = [NODE_NAMES[i] for i in idx_shown]
-    types_shown = [NODE_TYPES[i] for i in idx_shown]
+    ids_shown   = [node_ids[i]   for i in idx_shown]
+    names_shown = [node_names[i] for i in idx_shown]
+    types_shown = [node_types[i] for i in idx_shown]
 
-    # Map relevance → marker size (2–14 px)
     upper     = np.percentile(rel_shown, 99) if rel_shown.size else 1.0
     rel_norm  = np.clip(rel_shown, 0, upper) / (upper + eps)
     sizes_all = (2 + 12 * rel_norm).astype(np.float32)
 
     traces = []
-    for k, label in enumerate(LABELS):
+    for k, label in enumerate(labels):
         kidx = dom_shown == k
         if not kidx.any():
             continue
@@ -249,7 +287,7 @@ def update_figure(pct, proj_data):
             name=label,
             marker=dict(
                 size=sizes_all[kidx],
-                color=PALETTE[k],
+                color=PALETTE[k % len(PALETTE)],
                 opacity=0.65,
                 line=dict(width=0),
             ),
@@ -268,11 +306,22 @@ def update_figure(pct, proj_data):
         margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="#f8f8f8",
         legend=dict(font=dict(size=12), bgcolor="rgba(0,0,0,0)"),
-        uirevision="keep",   # preserve camera between slider updates
+        uirevision=stem,   # reset camera when dataset changes, preserve otherwise
     )
 
-    status = f"Showing {mask.sum():,} / {N:,} nodes  (≥ p{pct} relevance,  threshold = {threshold:.5f})"
-    return fig, status
+    status = (f"Showing {mask.sum():,} / {N:,} nodes  "
+              f"(≥ p{pct} relevance,  threshold = {threshold:.5f})")
+
+    legend = [
+        html.Span(
+            f"● {label}  ",
+            style={"color": PALETTE[k % len(PALETTE)], "fontWeight": "bold",
+                   "fontSize": "13px", "marginRight": "8px"},
+        )
+        for k, label in enumerate(labels)
+    ]
+
+    return fig, status, legend
 
 
 if __name__ == "__main__":

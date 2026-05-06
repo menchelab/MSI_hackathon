@@ -25,10 +25,12 @@ uv pip install -r requirements.txt
 For a detailed description of the multiscale interactome and its applications, please refer to our preprint [Identification of disease treatment mechanisms through the multiscale interactome](https://www.biorxiv.org/content/10.1101/2020.04.30.069690v3) (2020).
 
 ## Data
-All data is available at http://snap.stanford.edu/multiscale-interactome/data/data.tar.gz. To download the data, please run the following code in the same directory this project is cloned to. This should result in a data/ folder populated with the relevant data.
+All data is available at http://snap.stanford.edu/multiscale-interactome/data/data.tar.gz. To download the data, run the following from the project root. This populates the `data/` folder and copies the pre-computed diffusion profiles into `results/` where the code expects them.
 ```
 wget http://snap.stanford.edu/multiscale-interactome/data/data.tar.gz
 tar -xvf data.tar.gz
+unzip data/10_top_msi.zip -d data/
+cp data/10_top_msi/*.npy results/
 ```
 
 ## Setup
